@@ -1,80 +1,84 @@
+import os
+import re
+from typing import List, Dict
+from transformers import pipeline
 from bs4 import BeautifulSoup
 import requests
-import os
-import pickle
-import time
-from langchain_groq import ChatGroq
-from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
+from langchain.embeddings import SentenceTransformersEmbeddings
 
-# Initialize LLM
-llm = ChatGroq(temperature=0, groq_api_key="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", model_name="llama-3.1-70b-versatile")
 
-file_path = "faiss_store_openai.pkl"
+class WebsiteScraper:
 
-# Function to scrape content from a website
-def scrape_website(url):
-    # Send a request to the website
-    response = requests.get(url)
+    def _init_(self, url_list: List[str]):
+        self.url_list = url_list
 
-    if response.status_code == 200:
-        # Parse the HTML content of the page
-        soup = BeautifulSoup(response.content, 'html.parser')
-        # Extract text from all paragraph tags (you can adjust this as needed)
-        paragraphs = soup.find_all('p')
-        text = ' '.join([para.get_text() for para in paragraphs])
-        return text
-    else:
-        print(f"Failed to retrieve the webpage: {url}")
-        return ""
+    def crawl_and_extract(self):
+        extracted_texts = []
+        for url in self.url_list:
+            try:
+                response = requests.get(url)
+                soup = BeautifulSoup(response.content, "html.parser")
+                text = soup.get_text()
+                extracted_texts.append(text)
+            except Exception as e:
+                print(f"Error scraping {url}: {e}")
+        return extracted_texts
 
-# Process websites after input
-def process_websites(urls):
-    all_text = ""
+    def segment_text(self, extracted_texts):
+        return [text.split("\n") for text in extracted_texts]  
 
-    # Scrape text from all websites
-    for url in urls:
-        print(f"Processing website: {url}")
-        extracted_text = scrape_website(url)
-        all_text += extracted_text + "\n"
+    def generate_embeddings(self, text_chunks):
+        embedding_model = SentenceTransformersEmbeddings(model_name="all-MiniLM-L6-v2")
+        embeddings = embedding_model.embed_documents(text_chunks)
+        return embeddings
 
-    # Split text into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    text_chunks = text_splitter.split_text(all_text)
+    def store_embeddings(self, embeddings):
+        faiss_index = FAISS.from_documents(embeddings)
+        faiss_index.save_local("faiss_embeddings_db")
+        return faiss_index
 
-    # Create embeddings and vector store
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vectorstore_openai = FAISS.from_texts(text_chunks, embeddings)
+class QueryHandler:
 
-    # Save FAISS index
-    print("Embedding Vector Started Building...✅✅✅")
-    time.sleep(2)
+    def _init_(self, embeddings_store):
+        self.embeddings_store = embeddings_store
 
-    # Save the FAISS index to a pickle file
-    with open(file_path, "wb") as f:
-        pickle.dump(vectorstore_openai, f)
+    def convert_query_to_embeddings(self, query: str):
+        embedding_model = SentenceTransformersEmbeddings(model_name="all-MiniLM-L6-v2")
+        query_embedding = embedding_model.embed_query(query)  
+        return query_embedding
 
-    print("Text extracted and FAISS index saved.")
+    def perform_similarity_search(self, query_embedding):
+        return self.embeddings_store.similarity_search(query_embedding, k=3)
 
-# User input for URLs
-urls = input("Enter the website URLs (comma-separated): ").split(',')
+    def retrieve_chunks(self, similar_chunks):
+        return similar_chunks
 
-# Run processing after URL input
-process_websites(urls)
+class ResponseGenerator:
 
-# Query input
-query = input("Ask a Question: ")
-if query:
-    if os.path.exists(file_path):
-        with open(file_path, "rb") as f:
-            vectorstore = pickle.load(f)
-            chain = RetrievalQA.from_llm(llm=llm, retriever=vectorstore.as_retriever())
+    def _init_(self):
+        self.llm = pipeline("text-generation", model="gpt-3.5-turbo")  
 
-        # Get response
-        result = chain.run(query)
+    def generate_response(self, retrieved_chunks: List[str]):
+        context = " ".join(retrieved_chunks)
+        response = self.llm(context, max_length=150)  
+        return response[0]['generated_text']
+def main():
+    urls = ["https://example.com", "https://another-example.com"]
+    scraper = WebsiteScraper(urls)
+    extracted_texts = scraper.crawl_and_extract()
+    text_chunks = scraper.segment_text(extracted_texts)
+    embeddings = scraper.generate_embeddings(text_chunks)
+    faiss_index = scraper.store_embeddings(embeddings)
+    query_handler = QueryHandler(faiss_index)
+    user_query = "What is the significance of RAG in AI?"
+    query_embeddings = query_handler.convert_query_to_embeddings(user_query)
+    similar_chunks = query_handler.perform_similarity_search(query_embeddings)
+    retrieved_chunks = query_handler.retrieve_chunks(similar_chunks)
+    response_generator = ResponseGenerator()
+    response = response_generator.generate_response(retrieved_chunks)
+    print("Response:", response)
 
-        # Display answer
-        print("Answer:")
-        print(result)
+
+if _name_ == "_main_":
+    main()
